@@ -1,23 +1,30 @@
 from argparse import Namespace
+from math import ceil
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.special import softmax
 from sklearn.metrics import mean_squared_error
 
 plt.rcParams["text.usetex"] = True
 
-d_end = 1000
+d_end = 505
 d_start = 5
 d_step = 5
 n = 100
-trials = 20
+n_test = 100
+trials = 10
+#var = np.sqrt(2)
 var = 1
 
-cov_types = ["isotropic", "spiked", "poly"]
-# cov_types = ["spiked"]
-poly_exponents = [0.5, 1, 2]
-spiked_sizes = [10, 100]
-spiked_nums = [10, 100]
-#theta_star_types = ["unif", "e1"]
+# cov_types = ["isotropic", "spiked", "poly"]
+cov_types = ["spiked"]
+# poly_exponents = [0.5, 1, 2]
+poly_exponents = [2]
+# spiked_sizes = [100, "d", "d^2"]
+spiked_sizes = ["d"]
+spiked_nums = [1]
+# theta_star_types = ["unif", "e1"]
+# temperatures = [0.01, 0.001, 0.0001]
 theta_star_types = ["e1"]
 # y_types = ["sgn", "gaussian"]
 y_types = ["sgn"]
@@ -25,6 +32,12 @@ y_types = ["sgn"]
 args = Namespace()
 ds = np.arange(d_start, d_end, d_step)
 rng = np.random.default_rng()
+
+def repeated_argmax(x, num):
+    y = np.zeros(len(x))
+    argmaxes = np.argpartition(x, -num)[-num:]
+    y[argmaxes] = 1
+    return y
 
 def set_display_names(args, fname):
     # Adds y_type to filename.
@@ -44,6 +57,9 @@ def set_display_names(args, fname):
     elif args.theta_star_type == "e1":
         fname += "_e1"
         display_theta_star_type = r"$\theta^\star=e_1$"
+    elif args.theta_star_type == "e12":
+        fname += "_e12"
+        display_theta_star_type = r"$\theta^\star=e_{12}$"
     else:
         raise ValueError()
 
@@ -76,8 +92,8 @@ def plot(args, results):
                 if args.cov_type == "spiked":
                     for k, sub_result in enumerate(result):
                         label = display_name
-                        label += rf" size={spiked_sizes[j]},"
-                        label += rf" num={spiked_nums[k]}"
+                        label += rf" size=${spiked_sizes[j]}$,"
+                        label += rf" num=${spiked_nums[k]}$"
                         plt.plot(
                             ds[start:end],
                             sub_result[name][start:end],
@@ -88,7 +104,7 @@ def plot(args, results):
                         label = display_name
                     elif args.cov_type == "poly":
                         label = display_name
-                        label += rf" poly={poly_exponents[j]}"
+                        label += rf" poly=${poly_exponents[j]}$"
                     else:
                         raise ValueError()
 
@@ -113,13 +129,13 @@ def plot(args, results):
 
         title = fr"{display_theta_star_type}, {display_y_type}, "
         title += fr"{args.cov_type}, $n={n}$, "
-        title += fr"$\|\theta^\star\|_2^2={var}$, {trials} trials"
+        title += fr"$\|\theta^\star\|_2^2={round(var, 3)}$, {trials} trials"
 
         plt.ylim(ymin, ymax)
         plt.legend()
         plt.title(title)
         plt.xlabel("d")
-        plt.savefig(fname, bbox_inches="tight")
+        plt.savefig(fname, bbox_inches="tight", dpi=600)
         plt.clf()
 
     # Updates results with theoretical prediction term.
@@ -148,14 +164,14 @@ def plot(args, results):
         xmin=n + 10,
     )
     plot_helper(
-        ["theta_tilde_risk", "theta_hat_risk"],
-        [r"$L(\tilde{\theta})$", r"$L(\hat{\theta})$"],
+        ["theta_tilde_risk", "theta_hat_risk", "theta_new_risk"],
+        [r"$L(\tilde{\theta})$", r"$L(\hat{\theta})$", r"$L(\hat{\theta}^\prime)$"],
          "risk",
          ymax=ymax,
     )
     plot_helper(
-        ["theta_tilde_norm", "theta_hat_norm"],
-        [r"$\|\tilde{\theta}\|_2$", r"$\|\hat{\theta}\|_2$"],
+        ["theta_tilde_norm", "theta_hat_norm", "theta_new_norm"],
+        [r"$\|\tilde{\theta}\|_2$", r"$\|\hat{\theta}\|_2$", r"$\|\hat{\theta}^\prime\|_2$"],
         "norm",
         ymax=ymax,
     )
@@ -169,6 +185,25 @@ def experiment_trial(args, results, idx, d):
     elif args.theta_star_type == "e1":
         theta_star = np.zeros(d)
         theta_star[0] = var
+    elif args.theta_star_type == "e12":
+        theta_star = np.zeros(d)
+        theta_star[0] = var
+        theta_star[1] = var
+    else:
+        raise ValueError()
+
+    """
+    elif args.cov_type == "bilevel":
+        cov = np.identity(d)
+        p = np.log(d) / np.log(n)
+        r = 0.5
+        a = n ** -(p-r-0.01)
+        s = n ** r
+        for j in range(ceil(s)):
+            cov[j, j] = (a * d) / s
+        for j in range(ceil(s), d):
+            cov[j, j] = ((1-a)*d)/(d-s)
+    """
 
     # Generates the train data and labels using the ground-truth regressor.
     if args.cov_type == "isotropic":
@@ -176,9 +211,18 @@ def experiment_trial(args, results, idx, d):
     elif args.cov_type == "spiked":
         cov = np.identity(d)
         for j in range(min(args.spiked_num, d)):
-            cov[j, j] = args.spiked_size
+            if args.spiked_size == "d^2":
+                cov[j, j] = d ** 2
+            elif args.spiked_size == "d":
+                cov[j, j] = d
+            else:
+                cov[j, j] = args.spiked_size
+
+        # Rescales covariance to have norm 1.
+        cov = cov / cov[0, 0]
     elif args.cov_type == "poly":
         cov = np.diag([(j + 1) ** -args.poly_exponent for j in range(d)])
+        # TODO: rescale to have norm 1?
     else:
         raise ValueError()
 
@@ -188,13 +232,14 @@ def experiment_trial(args, results, idx, d):
     # Generates classifier data as sign of the regression labels or as Gaussian.
     if args.y_type == "sgn":
         y = np.sign(y_tilde)
+        # y *= np.mean(np.abs(y_tilde))
     elif args.y_type == "gaussian":
         y = rng.multivariate_normal(np.zeros(n), np.identity(n))
     else:
         raise ValueError()
 
     # Generates the test data and labels using the ground-truth regressor.
-    X_test = rng.multivariate_normal(np.zeros(d), np.identity(d), n).T
+    X_test = rng.multivariate_normal(np.zeros(d), np.identity(d), n_test).T
     y_tilde_test = X_test.T @ theta_star
 
     # Computes the minimum-norm interpolators for regression and classification.
@@ -220,14 +265,27 @@ def experiment_trial(args, results, idx, d):
     results["theta_tilde_norm"][idx].append(theta_tilde_norm)
     results["theta_hat_norm"][idx].append(theta_hat_norm)
 
+    # selector = args.spiked_num * softmax(theta_hat / temperature)
+    selector = repeated_argmax(theta_hat, args.spiked_num)
+    y_hat = X.T @ selector
+    theta_new = M.T @ y_hat
+    theta_new_test_risk = mean_squared_error(
+        X_test.T @ theta_new, y_tilde_test)
+    theta_new_norm = np.linalg.norm(theta_new)
+
+    results[f"theta_new_risk"][idx].append(theta_new_test_risk)
+    results[f"theta_new_norm"][idx].append(theta_new_norm)
+
 def experiment(args):
     # Initializes the results dictionary.
     results = {
         "risk_diff": [[] for _ in range(len(ds))],
         "theta_tilde_risk": [[] for _ in range(len(ds))],
         "theta_hat_risk": [[] for _ in range(len(ds))],
+        "theta_new_risk": [[] for _ in range(len(ds))],
         "theta_tilde_norm": [[] for _ in range(len(ds))],
         "theta_hat_norm": [[] for _ in range(len(ds))],
+        "theta_new_norm": [[] for _ in range(len(ds))],
     } 
 
     # Runs experiment trials.
