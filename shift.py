@@ -11,7 +11,7 @@ plt.rcParams["text.usetex"] = True
 
 def repeated_argmax(x, k):
     y = torch.zeros(len(x))
-    argmaxes = torch.topk(y, k)[1]
+    argmaxes = torch.topk(x, k)[1]
     y[argmaxes] = 1
     return y
 
@@ -74,7 +74,7 @@ def plot(args, results):
                     label = display_name
                 elif args.cov_type == "poly":
                     label = display_name
-                    label += rf" poly=${poly_exponents[j]}$"
+                    label += rf" poly=${args.poly_exponent}$"
 
                 plt.plot(
                     d_range[start:end],
@@ -100,18 +100,23 @@ def plot(args, results):
         plt.savefig(fname, bbox_inches="tight", dpi=600)
         plt.clf()
 
+    if args.y_type == "sgn":
+        ymax = args.var
+    elif args.y_type == "gaussian":
+        ymax = 2 * args.var
+
     # Plots the results.
     plot_helper(
         ["risk_diff"],
         [r"$L(\hat{\theta})-L(\tilde{\theta})$"],
         "diff",
-        ymax=args.var,
+        ymax=ymax,
     )
     plot_helper(
         ["theta_tilde_risk", "theta_hat_risk", "theta_new_risk"],
         [r"$L(\tilde{\theta})$", r"$L(\hat{\theta})$", r"$L(\hat{\theta}^\prime)$"],
         "risk",
-        ymax=args.var,
+        ymax=ymax,
     )
     plot_helper(
         ["theta_tilde_norm", "theta_hat_norm", "theta_new_norm"],
@@ -149,7 +154,10 @@ def experiment_trial(args, results, idx, d):
     elif args.cov_type == "poly":
         # Generates a polynomial decay covariance matrix which is diagonal
         # with the jth entry being j^{-poly_exponent}.
-        cov = torch.diag([(j + 1) ** -args.poly_exponent for j in range(d)])
+        eigenvalues = torch.tensor([
+            j ** -args.poly_exponent for j in range(1, d + 1)
+        ])
+        cov = torch.diag(eigenvalues)
 
     # Generates the train data and labels using the ground-truth regressor.
     D = MultivariateNormal(torch.zeros(d), cov)
@@ -192,7 +200,7 @@ def experiment_trial(args, results, idx, d):
     results["theta_hat_norm"][idx].append(theta_hat_norm)
 
     # Computes new predictor with repeated argmax strategy.
-    selector = repeated_argmax(theta_hat, args.spiked_num)
+    selector = repeated_argmax(theta_hat, args.theta_star_ei_num)
     y_hat = X.T @ selector
     theta_new = M.T @ y_hat
     theta_new_test_risk = F.mse_loss(
@@ -231,9 +239,6 @@ def experiment(args):
 def main(args):
     os.makedirs(args.out_dir, exist_ok=True)
 
-    # Sets random seeds and default device.
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
     if args.cuda and torch.cuda.is_available():
         torch.set_default_tensor_type("torch.cuda.FloatTensor")
 
@@ -256,7 +261,6 @@ if __name__ == "__main__":
     parser.add("--n", default=100, type=int)
     parser.add("--n_test", default=100, type=int)
     parser.add("--out_dir", default="out")
-    parser.add("--seed", default=1, type=int)
     parser.add("--spiked_num", default=1, type=int)
     parser.add("--spiked_ratio", default="d")
     parser.add("--theta_star_type", choices=["ei", "unif"], default="ei")
