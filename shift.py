@@ -6,40 +6,41 @@ import os
 import torch
 from torch.distributions.multivariate_normal import MultivariateNormal
 import torch.nn.functional as F
+import warnings
 
 plt.rcParams["text.usetex"] = True
 
-def repeated_argmax(x, k):
-    y = torch.zeros(len(x))
-    argmaxes = torch.topk(x, k)[1]
-    y[argmaxes] = 1
-    return y
+def topk_inds(x, k):
+    return torch.zeros(len(x)).scatter_(0, torch.topk(x, k)[1], 1)
 
 def set_display_metrics(args, fname):
     # Adds y_type to filename.
-    if args.y_type == "sgn":
-        fname += "_sgn"
-        display_y_type = r"$y=sgn(\tilde{y})$"
-    elif args.y_type == "gaussian":
+    if args.y_type == "gaussian":
         fname += "_gaussian"
         display_y_type = r"$y\sim\mathcal{N}(0,1)$"
-
+    elif args.y_type == "sgn":
+        fname += "_sgn"
+        display_y_type = r"$y=sgn(\tilde{y})$"
+    
     # Adds theta_star_type to filename.
-    if args.theta_star_type == "unif":
+    if args.theta_star_type == "k_sparse":
+        vecs = "".join([str(j) for j in range(1, args.k_sparse_num + 1)])
+        fname += f"_{args.k_sparse_num}-sparse"
+        display_theta_star_type = fr"$\theta^\star={args.k_sparse_num}$-sparse"
+    if args.theta_star_type == "step":
+        fname += f"_step{args.step_val}"
+        display_theta_star_type = rf"$\theta^\star=(1,{args.step_val},0,\dots)$"
+    elif args.theta_star_type == "unif":
         fname += "_unif"
         display_theta_star_type = r"$\theta^\star\sim U(-1,1)$"
-    elif args.theta_star_type == "ei":
-        vecs = "".join([str(j) for j in range(1, args.theta_star_ei_num + 1)])
-        fname += f"_e{vecs}"
-        display_theta_star_type = fr"$\theta^\star=e_{{{vecs}}}$"
 
     # Adds cov_type to filename.
     if args.cov_type == "isotropic":
         fname += "_isotropic.png"
-    elif args.cov_type == "spiked":
-        fname += "_spiked.png"
     elif args.cov_type == "poly":
         fname += "_poly.png"
+    elif args.cov_type == "spiked":
+        fname += "_spiked.png"
 
     fname = os.path.join(args.out_dir, fname)
 
@@ -60,27 +61,24 @@ def plot(args, results):
 
         # Plots specified range of data.
         for name, display_name in zip(metrics, display_metrics):
-            if args.cov_type == "spiked":
+            if args.cov_type == "isotropic":
                 label = display_name
-                label += rf" ratio=${args.spiked_ratio}$,"
+            elif args.cov_type == "poly":
+                label = display_name
+                label += rf" poly=${args.poly_exponent}$"
+            elif args.cov_type == "spiked":
+                label = display_name
+                label += rf" ratio=${args.spiked_ratio}$"
                 label += rf" num=${args.spiked_num}$"
-                plt.plot(
-                    d_range[start:end],
-                    results[name][start:end],
-                    label=label,
-                )
-            else:
-                if args.cov_type == "isotropic":
-                    label = display_name
-                elif args.cov_type == "poly":
-                    label = display_name
-                    label += rf" poly=${args.poly_exponent}$"
 
-                plt.plot(
-                    d_range[start:end],
-                    results[name][start:end],
-                    label=label,
-                )
+            if "theta_new" in name:
+                label += rf" temp=${args.temperature}$"
+
+            plt.plot(
+                d_range[start:end],
+                results[name][start:end],
+                label=label,
+            )
 
         # Automatically crops the y-axis if a bound on the x-axis is specified.
         if (xmin or xmax) and not ymax:
@@ -89,7 +87,7 @@ def plot(args, results):
             ]).flatten())
 
         title = fr"{display_theta_star_type}, {display_y_type}, "
-        title += fr"{args.cov_type}, $n={args.n}$, "
+        title += fr"$\Sigma=${args.cov_type}, $n={args.n}$, "
         title += fr"$\|\theta^\star\|_2^2={round(args.var, 3)}$, "
         title += f"{args.trials} trials"
 
@@ -101,7 +99,12 @@ def plot(args, results):
         plt.clf()
 
     if args.y_type == "sgn":
-        ymax = args.var
+        if args.cov_type == "isotropic":
+            ymax = args.var
+        elif args.cov_type == "poly":
+            ymax = 1.5
+        elif args.cov_type == "spiked":
+            ymax = args.var + 0.25
     elif args.y_type == "gaussian":
         ymax = 2 * args.var
 
@@ -125,20 +128,53 @@ def plot(args, results):
         ymax=2 * args.var,
     )
 
+def make_selector(args, theta_hat, theta_star):
+    if args.theta_star_type == "k-sparse":
+        k = args.k_sparse_num
+    elif args.cov_type == "spiked":
+        k = args.spiked_num
+    elif args.theta_star_type == "step":
+        k = 2
+    else:
+        raise NotImplementedError()
+
+    sgn_mask = torch.sign(theta_hat)
+    inds = topk_inds(torch.abs(theta_hat), k).bool()
+    softmaxed_topk = F.softmax(
+        torch.abs(theta_hat)[inds] / args.temperature, dim=0)
+
+    selector = torch.zeros(len(theta_hat))
+    selector[inds] = softmaxed_topk
+    selector *= torch.linalg.vector_norm(theta_star, ord=1)
+    selector *= sgn_mask
+
+    return selector
+
 def experiment_trial(args, results, idx, d):
     # Generates the ground-truth regressor.
-    if args.theta_star_type == "unif":
-        theta_star = -2 * torch.random(d) + 1 # theta_star ~ Unif(-1, 1).
-        theta_star = theta_star / torch.norm(theta_star)
-    elif args.theta_star_type == "ei":
+    if args.theta_star_type == "k_sparse":
         theta_star = torch.zeros(d)
-        theta_star[:args.theta_star_ei_num] = 1
-    args.var = torch.norm(theta_star).item()
+        theta_star[:args.k_sparse_num] = 1
+    elif args.theta_star_type == "step":
+        theta_star = torch.zeros(d)
+        theta_star[0] = 1
+        theta_star[1] = args.step_val
+    elif args.theta_star_type == "unif":
+        theta_star = -2 * torch.random(d) + 1 # theta_star ~ Unif(-1, 1).
+        theta_star = theta_star / torch.linalg.vector_norm(theta_star, ord=2)
+    args.var = torch.linalg.vector_norm(theta_star, ord=2).item()
 
     # Generates the covariance matrix.
     if args.cov_type == "isotropic":
         # Generates an isotropic (identity) covariance matrix.
         cov = torch.eye(d)
+    elif args.cov_type == "poly":
+        # Generates a polynomial decay covariance matrix which is diagonal
+        # with the jth entry being j^{-poly_exponent}.
+        eigenvalues = torch.tensor([
+            j ** -args.poly_exponent for j in range(1, d + 1)
+        ])
+        cov = torch.diag(eigenvalues)
     elif args.cov_type == "spiked":
         # Generates a spiked covariance matrix which is diagonal with 1 in the
         # first spiked_num entries and 1 / spiked_ratio in the rest.
@@ -151,13 +187,6 @@ def experiment_trial(args, results, idx, d):
             else:
                 cov[j, j] = args.spiked_ratio
         cov = cov / cov[0, 0]
-    elif args.cov_type == "poly":
-        # Generates a polynomial decay covariance matrix which is diagonal
-        # with the jth entry being j^{-poly_exponent}.
-        eigenvalues = torch.tensor([
-            j ** -args.poly_exponent for j in range(1, d + 1)
-        ])
-        cov = torch.diag(eigenvalues)
 
     # Generates the train data and labels using the ground-truth regressor.
     D = MultivariateNormal(torch.zeros(d), cov)
@@ -186,8 +215,8 @@ def experiment_trial(args, results, idx, d):
     theta_hat_test_risk = F.mse_loss(
         X_test.T @ theta_hat, y_tilde_test)
 
-    theta_tilde_norm = torch.norm(theta_tilde)
-    theta_hat_norm = torch.norm(theta_hat)
+    theta_tilde_norm = torch.linalg.vector_norm(theta_tilde, ord=2)
+    theta_hat_norm = torch.linalg.vector_norm(theta_hat, ord=2)
 
     # Computes the difference of the test risks of the classifier and regressor.
     risk_diff = (theta_hat_test_risk - theta_tilde_test_risk)
@@ -199,13 +228,20 @@ def experiment_trial(args, results, idx, d):
     results["theta_tilde_norm"][idx].append(theta_tilde_norm)
     results["theta_hat_norm"][idx].append(theta_hat_norm)
 
-    # Computes new predictor with repeated argmax strategy.
-    selector = repeated_argmax(theta_hat, args.theta_star_ei_num)
+    # Computes new predictor using theta_hat by taking the top-k indices if
+    # theta_star is k-sparse or else by taking the softmax with temperature.
+    if args.theta_star_type == "k_sparse":
+        selector = topk_inds(theta_hat, args.k_sparse_num)
+    elif args.theta_star_type == "step":
+        selector = make_selector(args, theta_hat, theta_star)
+    elif args.theta_star_type == "unif":
+        selector = F.softmax(theta_hat / args.temperature, dim=0)
+
     y_hat = X.T @ selector
     theta_new = M.T @ y_hat
     theta_new_test_risk = F.mse_loss(
         X_test.T @ theta_new, y_tilde_test)
-    theta_new_norm = torch.norm(theta_new)
+    theta_new_norm = torch.linalg.vector_norm(theta_new, ord=2)
 
     results[f"theta_new_risk"][idx].append(theta_new_test_risk)
     results[f"theta_new_norm"][idx].append(theta_new_norm)
@@ -226,7 +262,9 @@ def experiment(args):
 
     # Runs experiment trials.
     for idx, d in enumerate(d_range):
-        for _ in range(args.trials):
+        for t in range(args.trials):
+            if t == 0 and d % 500 == 0:
+                print(f"Running d={d}...")
             experiment_trial(args, results, idx, d)
             
     # Computes the mean over all trials for each metric and value of d in the
@@ -251,21 +289,23 @@ if __name__ == "__main__":
         config_arg_is_required=False,
     )
 
-    # Load_range configuration parameters into parser.
+    # Loads configuration parameters into parser.
     parser.add("--cov_type", choices=["isotropic", "poly", "spiked"], default="spiked")
     parser.add("--cuda", default=True, type=lambda x: bool(strtobool(x)))
-    parser.add("--d_start", default=5, type=int)
-    parser.add("--d_step", default=5, type=int)
-    parser.add("--d_end", default=1000, type=int)
-    parser.add("--poly_exponent", default=2, type=float)
-    parser.add("--n", default=100, type=int)
+    parser.add("--d_start", default=20, type=int)
+    parser.add("--d_step", default=20, type=int)
+    parser.add("--d_end", default=5000, type=int)
+    parser.add("--k_sparse_num", default=1, type=int)
+    parser.add("--n", default=50, type=int)
     parser.add("--n_test", default=100, type=int)
     parser.add("--out_dir", default="out")
+    parser.add("--poly_exponent", default=5, type=float)
     parser.add("--spiked_num", default=1, type=int)
     parser.add("--spiked_ratio", default="d")
-    parser.add("--theta_star_type", choices=["ei", "unif"], default="ei")
-    parser.add("--theta_star_ei_num", default=1, type=int)
-    parser.add("--trials", default=10, type=int)
+    parser.add("--step_val", default=0.5, type=float)
+    parser.add("--theta_star_type", choices=["k_sparse", "step", "unif"], default="k_sparse")
+    parser.add("--temperature", default=1, type=float)
+    parser.add("--trials", default=5, type=int)
     parser.add("--y_type", choices=["gaussian", "sgn"], default="sgn")
     args = parser.parse_args()
 
@@ -279,6 +319,17 @@ if __name__ == "__main__":
                 "If spiked_ratio is a string, it must be one of"
                 f" {allowed_spiked_ratio_strings}."
             ))
+
+    # Spiked num should align with k_sparse_num or step_num.
+    if args.cov_type == "spiked":
+        if args.theta_star_type == "k_sparse" and \
+                args.k_sparse_num != args.spiked_num:
+            warnings.warn((
+                "Spiked covariance and k-sparse model are specified"
+                " but k_sparse_num != spiked_num."
+            ))
+        elif args.theta_star_type == "step" and args.spiked_num != 2:
+            warnings.warn("Step model is specified but spiked_num != 2.")
 
     main(args)
 
