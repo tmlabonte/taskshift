@@ -190,30 +190,30 @@ def experiment_trial(args, results, idx, d):
 
     # Generates the train data and labels using the ground-truth regressor.
     D = MultivariateNormal(torch.zeros(d), cov)
-    X = D.sample((args.n,)).T
-    y_tilde = X.T @ theta_star
+    X = D.sample((args.n,)) # n x d
+    y_tilde = X @ theta_star # n
 
     # Generates classifier data as either the signs of the regression labels
     # or as independent standard Gaussians.
     if args.y_type == "sgn":
-        y = torch.sign(y_tilde)
+        y = torch.sign(y_tilde) # n
     elif args.y_type == "gaussian":
-        y = torch.normal(0, 1, (args.n,))
+        y = torch.normal(0, 1, (args.n,)) # n
 
     # Generates the test data and labels using the ground-truth regressor.
-    X_test = D.sample((args.n_test,)).T
-    y_tilde_test = X_test.T @ theta_star
+    X_test = D.sample((args.n_test,)) # n_test x d
+    y_tilde_test = X_test @ theta_star # n_test
 
     # Computes the minimum-norm interpolators for regression and classification.
-    M = X.T @ torch.linalg.pinv(X @ X.T, hermitian=True)
-    theta_tilde = M.T @ y_tilde
-    theta_hat = M.T @ y
+    M = X.T @ torch.linalg.inv(X @ X.T) # n x d
+    theta_tilde = M @ y_tilde # d
+    theta_hat = M @ y # d
 
     # Computes the test risk of the minimum-norm interpolators.
     theta_tilde_test_risk = F.mse_loss(
-        X_test.T @ theta_tilde, y_tilde_test)
+        X_test @ theta_tilde, y_tilde_test)
     theta_hat_test_risk = F.mse_loss(
-        X_test.T @ theta_hat, y_tilde_test)
+        X_test @ theta_hat, y_tilde_test)
 
     theta_tilde_norm = torch.linalg.vector_norm(theta_tilde, ord=2)
     theta_hat_norm = torch.linalg.vector_norm(theta_hat, ord=2)
@@ -237,10 +237,10 @@ def experiment_trial(args, results, idx, d):
     elif args.theta_star_type == "unif":
         selector = F.softmax(theta_hat / args.temperature, dim=0)
 
-    y_hat = X.T @ selector
-    theta_new = M.T @ y_hat
+    y_hat = X @ selector # n
+    theta_new = M @ y_hat # d
     theta_new_test_risk = F.mse_loss(
-        X_test.T @ theta_new, y_tilde_test)
+        X_test @ theta_new, y_tilde_test)
     theta_new_norm = torch.linalg.vector_norm(theta_new, ord=2)
 
     results[f"theta_new_risk"][idx].append(theta_new_test_risk)
