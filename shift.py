@@ -14,25 +14,38 @@ plt.rcParams["text.usetex"] = True
 plt.rcParams.update({"font.size": 18})
 
 def topk_inds(x, k):
-    return torch.zeros(len(x)).scatter_(0, torch.topk(x, k)[1], 1)
+    """Returns mask of top-k elements of x."""
+    return torch.zeros(len(x)).scatter_(0, torch.topk(x, k)[1], 1).bool()
 
-def set_display_metrics(args, fname):
+def postprocess(theta_hat, X, empirical_support, true_variance):
+    """Scales classification MNI using knowledge of variance."""
+
+    # Computes empirical variances for the support.
+    # empirical_variances = torch.var(X, dim=0)[empirical_support]
+
+    # Computes postprocessed predictor using formula and variances.
+    sgn = torch.sign(theta_hat[empirical_support])
+    theta_new = theta_hat[empirical_support]
+    theta_new *= np.sqrt((np.pi / 2) * true_variance)
+    theta_new = sgn * theta_new
+
+    theta_final = torch.zeros(len(theta_hat))
+    theta_final[empirical_support] = theta_new
+
+    return theta_final
+
+def set_fname(args, fname):
     # Adds y_type to filename.
     if args.y_type == "gaussian":
         fname += "_gaussian"
-        display_y_type = r"$y\sim\mathcal{N}(0,1)$"
     elif args.y_type == "sgn":
         fname += "_sgn"
-        display_y_type = r"$y=sgn(\tilde{y})$"
     
     # Adds theta_star_type to filename.
     if args.theta_star_type == "sparse":
-        vecs = "".join([str(j) for j in range(1, args.sparse_num + 1)])
-        fname += f"_{args.sparse_num}-sparse"
-        display_theta_star_type = fr"$\theta^\star={args.sparse_num}$-sparse"
+        fname += "_sparse"
     elif args.theta_star_type == "gaussian":
         fname += "_gaussian"
-        display_theta_star_type = r"$\theta^\star\sim N(0,1)$"
 
     # Adds cov_type to filename.
     if args.cov_type == "isotropic":
@@ -44,101 +57,65 @@ def set_display_metrics(args, fname):
 
     fname = os.path.join(args.out_dir, fname)
 
-    return fname, display_theta_star_type, display_y_type
+    return fname
 
 def plot(args, results):
-    if args.x_axis_type == "n":
-        x_range = list(range(args.n_start, args.n_end + 1, args.n_step))
-    elif args.x_axis_type == "d":
-        x_range = list(range(args.d_start, args.d_end + 1, args.d_step))
+    n_range = list(range(args.n_start, args.n_end + 1, args.n_step))
 
     # Defines a helper function for plotting the results.
     def plot_helper(
-        metrics, display_metrics, fname, xmin=None, xmax=None, ymin=0, ymax=None
+        metrics, display_metrics, fname, ymin=0, ymax=None
     ):
-        fname, display_theta_star_type, display_y_type = \
-                set_display_metrics(args, fname)
-
-        if args.x_axis_type == "n":
-            start = (xmin - args.n_start) // args.n_step if xmin else 0
-            end = (xmax - args.n_start) // args.n_step if xmax else len(x_range)
-        elif args.x_axis_type == "d":
-            start = (xmin - args.d_start) // args.d_step if xmin else 0
-            end = (xmax - args.d_start) // args.d_step if xmax else len(x_range)
-
+        fname = set_fname(args, fname)
+        
         # Plots specified range of data.
-        for name, display_name in zip(metrics, display_metrics):
-            if args.cov_type == "isotropic":
-                label = display_name
-            elif args.cov_type == "poly":
-                label = display_name
-            elif args.cov_type == "spiked":
-                label = display_name
-
+        for metric, display_metric in zip(metrics, display_metrics):
             plt.plot(
-                x_range[start:end],
-                results[name][start:end],
-                label=label,
+                n_range,
+                metric,
+                label=display_metric,
                 linewidth=5,
             )
 
-        # Automatically crops the y-axis if a bound on the x-axis is specified.
-        if (xmin or xmax) and not ymax:
-            ymax = max(torch.tensor([
-                result[metric][start:end] for metric in metrics
-            ]).flatten())
-
-        title = fr"{display_theta_star_type}, {display_y_type}, "
-        title += fr"$\Sigma=${args.cov_type}, $d={args.d_coef}n^{{{args.d_pow}}}$, "
-        title += fr"$\|\theta^\star\|_2^2={round(args.var, 3)}$, "
-        title += f"{args.trials} trials"
-        xlabel = "$n$" if args.x_axis_type == "n" else "$d$"
-
         plt.ylim(ymin, ymax)
         plt.legend()
-        # plt.title(title)
-        plt.xlabel(xlabel)
-        plt.ylabel("Risk")
+        plt.xlabel(r"$n$")
+        if "risk" in fname:
+            plt.ylabel("Risk")
         plt.grid(alpha=0.5)
         plt.savefig(fname, bbox_inches="tight", dpi=600)
         plt.clf()
 
-    if args.x_axis_type == "n":
-        if args.y_type == "sgn":
-            if args.cov_type == "isotropic":
-                ymax = 2 * args.var
-            elif args.cov_type == "poly":
-                ymax = 1.5
-            elif args.cov_type == "spiked":
-                ymax = None
-        elif args.y_type == "gaussian":
-            ymax = 2 * args.var
-    elif args.x_axis_type == "d":
-        ymax = 1.5
+    # Puts back missing dimension when len(args.sparse_inds) = 1.
+    try:
+        len_support = len(results["theta_hat_support"][0])
+    except TypeError:
+        results["theta_hat_support"] = results["theta_hat_support"][..., np.newaxis]
+        len_support = len(results["theta_hat_support"][0])
 
-    # Plots the results.
+    # Plots results.
     plot_helper(
-        ["risk_diff"],
-        [r"$R(\hat{\theta})-R(\theta)$"],
+        [results["theta_hat_support"][:, s] for s in range(len_support)] + [results["theta_hat_other_avg"]],
+        [r"$\hat{k}_{j}$".format(k=r"\theta", j=j) for j in range(1, len_support + 1)] +
+            ["Average of non-support"],
+        "support",
+    )
+    plot_helper(
+        [results["theta_new_diff"]],
+        [r"$\|\hat{\theta}^\prime - \theta^\star\|_2$"],
         "diff",
-        ymax=ymax,
     )
     plot_helper(
-        ["theta_tilde_risk", "theta_hat_risk", "theta_new_risk"],
-        [r"$R(\theta)$", r"$R(\hat{\theta})$", r"$R(\hat{\theta}^\prime)$"],
+        [results["theta_tilde_risk"], results["theta_hat_risk"], results["theta_new_risk"]],
+        [r"$L(\tilde{\theta})$", r"$L(\hat{\theta})$", r"$L(\hat{\theta}^\prime)$"],
         "risk",
-        ymax=ymax,
     )
     plot_helper(
-        ["theta_tilde_norm", "theta_hat_norm", "theta_new_norm"],
-        [r"$\|\theta\|_2$", r"$\|\hat{\theta}\|_2$", r"$\|\hat{\theta}^\prime\|_2$"],
-        "norm",
-        ymax=2 * args.var,
+        [results["theta_star_1"], results["theta_tilde_1"], results["theta_hat_1"], results["theta_new_1"]],
+        [r"$\theta^\star_1$", r"$\tilde{\theta}_1$", r"$\hat{\theta}_1$", r"$\hat{\theta}^\prime_1$"],
+        "vals",
     )
-
-def make_selector(args, theta_hat, theta_star):
-    return selector
-
+    
 def gradient_descent(X, y):
     max_steps = 1000
     early_stop_loss = 0.001
@@ -159,22 +136,15 @@ def gradient_descent(X, y):
 
     return theta
 
-def experiment_trial(args, results, idx, x):
-    if args.x_axis_type == "n":
-        n = x
-        d = math.ceil(args.d_coef * n ** args.d_pow)
-    elif args.x_axis_type == "d":
-        d = x
-        n = math.floor((d  / args.d_coef) ** (1 / args.d_pow))
-
-    # Generates the ground-truth regressor.
-    if args.theta_star_type == "sparse":
-        theta_star = torch.zeros(d)
-        theta_star[:args.sparse_num] = 1
-    elif args.theta_star_type == "gaussian":
-        theta_star = torch.normal(0, 1, size=(d,))
-        theta_star = theta_star / torch.linalg.vector_norm(theta_star, ord=2)
-
+def experiment_trial(args, results, idx, n):
+    # Sets dimension d and spiked parameters.
+    if args.cov_type == "spiked":
+        d = int(n ** args.spiked_p)
+        s = int(n ** args.spiked_r)
+        a = n ** -args.spiked_q
+    else:
+        d = int(args.d_coef * n ** args.d_pow)
+    
     # Generates the covariance matrix.
     if args.cov_type == "isotropic":
         # Generates an isotropic (identity) covariance matrix.
@@ -186,15 +156,26 @@ def experiment_trial(args, results, idx, x):
             j ** -args.poly_pow for j in range(1, d + 1)
         ])
     elif args.cov_type == "spiked":
-        # Generates a spiked covariance matrix which is diagonal with 1 in the
-        # first spiked_num entries and n^alpha / d in the rest.
+        # Generates a spiked covariance matrix which is diagonal with ad/s in
+        # the first s entries and (1-a)d/(d-s) otherwise.
         cov_diag = torch.ones(d)
-        for j in range(args.spiked_num, d):
-            cov_diag[j] = n ** args.spiked_ratio_pow / d
+        for j in range(s):
+            cov_diag[j] = (a * d) / s
+        for j in range(s, d):
+            cov_diag[j] = ((1 - a) * d) / (d - s)
 
-    # Computes total variance/signal strength || cov^{1/2} theta* ||_2^2.
-    var_vec = torch.sqrt(cov_diag) * theta_star
-    args.var = torch.linalg.vector_norm(var_vec).item() ** 2
+    # Generates the ground-truth regressor.
+    if args.theta_star_type == "sparse":
+        theta_star = torch.zeros(d)
+        cov_on_support = cov_diag[torch.tensor(args.sparse_inds)]
+        theta_star[torch.tensor(args.sparse_inds)] = torch.tensor(args.sparse_vals) / torch.sqrt(cov_on_support)
+    elif args.theta_star_type == "gaussian":
+        theta_star = torch.normal(0, 1, size=(d,))
+        theta_star = theta_star / torch.linalg.vector_norm(theta_star, ord=2)
+
+    # Computes total variance/signal strength.
+    variance_vector = torch.sqrt(cov_diag) * theta_star
+    true_variance = torch.linalg.vector_norm(variance_vector).item() ** 2
 
     # Generates the train data and labels using the ground-truth regressor.
     # The distribution D is equivalent to a MultivariateNormal but uses a
@@ -230,61 +211,76 @@ def experiment_trial(args, results, idx, x):
         theta_hat_test_risk = F.mse_loss(
             X_test @ theta_hat, y_tilde_test)
 
-        theta_tilde_norm = torch.linalg.vector_norm(theta_tilde, ord=2)
-        theta_hat_norm = torch.linalg.vector_norm(theta_hat, ord=2)
-        risk_diff = (theta_hat_test_risk - theta_tilde_test_risk)
+        # Computes other metrics of interest.
+        true_support = torch.zeros(len(theta_hat), dtype=bool)
+        true_support[torch.tensor(args.sparse_inds)] = True
+        theta_hat_support = theta_hat[true_support]
+        theta_hat_other_avg = torch.mean(theta_hat[~true_support])
 
-        # Adds relevant metrics to the results dictionary.
-        results["risk_diff"][idx].append(risk_diff)
-        results["theta_tilde_risk"][idx].append(theta_tilde_test_risk)
+        # Adds metrics to the results dictionary.
+        results["theta_hat_1"][idx].append(theta_hat[0])
         results["theta_hat_risk"][idx].append(theta_hat_test_risk)
-        results["theta_tilde_norm"][idx].append(theta_tilde_norm)
-        results["theta_hat_norm"][idx].append(theta_hat_norm)
+        results["theta_hat_support"][idx].append(theta_hat_support)
+        results["theta_hat_other_avg"][idx].append(theta_hat_other_avg)
+        results["theta_star_1"][idx].append(theta_star[0])
+        results["theta_tilde_1"][idx].append(theta_tilde[0])
+        results["theta_tilde_risk"][idx].append(theta_tilde_test_risk)
 
-        # Computes new predictor using theta_hat by taking the top-k indices.
-        if args.theta_star_type == "sparse":
-            selector = topk_inds(theta_hat, args.sparse_num)
+    # Computes new predictor using postprocessing algorithm.
+    if args.theta_star_type == "sparse":
+        # Selects top-k indices of theta_hat (assumes we know k).
+        empirical_support = topk_inds(theta_hat, len(args.sparse_inds))
 
-    y_hat = X @ selector # n
-    if args.solver == "direct":
-        theta_new = M @ y_hat # d
-    elif args.solver == "gd":
-        theta_new = gradient_descent(X, y_hat)
-    theta_new_test_risk = F.mse_loss(
-        X_test @ theta_new, y_tilde_test)
-    theta_new_norm = torch.linalg.vector_norm(theta_new, ord=2)
+        # TODO: Implement few-shot least-squares postprocessing.
 
-    results[f"theta_new_risk"][idx].append(theta_new_test_risk)
-    results[f"theta_new_norm"][idx].append(theta_new_norm)
+        # Scales the classification MNI using knowledge of variance.
+        theta_new = postprocess(theta_hat, X, empirical_support, true_variance)
+
+        with torch.no_grad(): # IMPORTANT
+            # Computes the test risk of the postprocessed predictor.
+            theta_new_test_risk = F.mse_loss(
+                X_test @ theta_new, y_tilde_test)
+
+            # Computes other metrics of interest.
+            theta_new_diff = torch.linalg.vector_norm(theta_star - theta_new)
+            
+            # Adds metrics to the results dictionary.
+            results["theta_new_1"][idx].append(theta_new[0])
+            results["theta_new_risk"][idx].append(theta_new_test_risk)
+            results["theta_new_diff"][idx].append(theta_new_diff)
 
 def experiment(args):
-    if args.x_axis_type == "n":
-        x_range = list(range(args.n_start, args.n_end + 1, args.n_step))
-    elif args.x_axis_type == "d":
-        x_range = list(range(args.d_start, args.d_end + 1, args.d_step))
+    n_range = list(range(args.n_start, args.n_end + 1, args.n_step))
 
     # Initializes the results dictionary.
     results = {
-        "risk_diff":        [[] for _ in range(len(x_range))],
-        "theta_tilde_risk": [[] for _ in range(len(x_range))],
-        "theta_hat_risk":   [[] for _ in range(len(x_range))],
-        "theta_new_risk":   [[] for _ in range(len(x_range))],
-        "theta_tilde_norm": [[] for _ in range(len(x_range))],
-        "theta_hat_norm":   [[] for _ in range(len(x_range))],
-        "theta_new_norm":   [[] for _ in range(len(x_range))],
+        "theta_hat_1":         [[] for _ in range(len(n_range))],
+        "theta_hat_risk":      [[] for _ in range(len(n_range))],
+        "theta_hat_support":   [[] for _ in range(len(n_range))],
+        "theta_hat_other_avg": [[] for _ in range(len(n_range))],
+        "theta_new_1"  :       [[] for _ in range(len(n_range))],
+        "theta_new_risk":      [[] for _ in range(len(n_range))],
+        "theta_new_diff":      [[] for _ in range(len(n_range))],
+        "theta_star_1":       [[] for _ in range(len(n_range))],
+        "theta_tilde_1":       [[] for _ in range(len(n_range))],
+        "theta_tilde_risk":    [[] for _ in range(len(n_range))],
     } 
 
     # Runs experiment trials.
-    for idx, x in enumerate(x_range):
+    for idx, n in enumerate(n_range):
         for t in range(args.trials):
-            if t == 0 and x % 100 == 0:
-                print(f"Running {args.x_axis_type}={x}...")
-            experiment_trial(args, results, idx, x)
+            if t == 0 and n % 100 == 0:
+                print(f"Running n={n}...")
+            experiment_trial(args, results, idx, n)
             
-    # Computes the mean over all trials for each metric and value of d in the
+    # Computes the mean over all trials for each metric and value of n in the
     # results dictionary.
     for metric, value in results.items():
-        results[metric] = torch.mean(torch.tensor(value), axis=1).cpu().numpy()
+        try:
+            value = torch.tensor(value)
+        except ValueError:
+            value = torch.stack([torch.stack(v) for v in value])
+        results[metric] = torch.mean(value, dim=1).cpu().numpy()
 
     return results
 
@@ -319,21 +315,19 @@ if __name__ == "__main__":
     parser.add("--out_dir", default="out")
     parser.add("--poly_pow", default=2, type=float)
     parser.add("--solver", choices=["direct", "gd"], default="direct")
-    parser.add("--sparse_inds", default=[], nargs="*", type=int)
-    parser.add("--sparse_vals", default=[], nargs="*", type=float)
-    parser.add("--spiked_p", default=2, type=float)
+    parser.add("--sparse_inds", default=[0], nargs="*", type=int)
+    parser.add("--sparse_vals", default=[1.], nargs="*", type=float)
+    parser.add("--spiked_p", default=1.5, type=float)
     parser.add("--spiked_q", default=0.5, type=float)
     parser.add("--spiked_r", default=0, type=float)
-    parser.add("--theta_star_type", choices=["sparse", "gaussian"], default="sparse")
+    parser.add("--theta_star_type", choices=["gaussian", "sparse"], default="sparse")
     parser.add("--trials", default=5, type=int)
-    # Either scales n and d together ("d") or holds n constant ("n").
-    parser.add("--x_axis_type", choices=["n", "d"], default="n")
     parser.add("--y_type", choices=["gaussian", "sgn"], default="sgn")
     args = parser.parse_args()
 
     if args.spiked_p <= 1:
         raise ValueError(f"Found p = {args.spiked_p} but requires p > 1.")
-    if args.spiked_q <= 0 or args.spiked_q > p - r:
+    if args.spiked_q <= 0 or args.spiked_q > args.spiked_p - args.spiked_r:
         raise ValueError(f"Found q = {args.spiked_q} but requires 0 < q < p - r.")
     if args.spiked_r < 0 or args.spiked_r >= 1:
         raise ValueError(f"Found r = {args.spiked_r} but requires 0 <= r < 1.")
