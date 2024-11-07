@@ -1,17 +1,25 @@
+"""Main file for task shift simulations."""
+
+# Imports Python builtins.
+from copy import deepcopy
+import os
+
+# Imports Python packages.
 from configargparse import Parser
 from distutils.util import strtobool
 import matplotlib.pyplot as plt
-import math
 import numpy as np
-import os
+
+# Imports PyTorch packages.
 import torch
 from torch.distributions.independent import Independent
 from torch.distributions.normal import Normal
 import torch.nn.functional as F
-import warnings
 
+# Sets matplotlib font parameters.
 plt.rcParams["text.usetex"] = True
 plt.rcParams.update({"font.size": 18})
+
 
 def topk_inds(x, k):
     """Returns mask of top-k elements of abs(x)."""
@@ -32,12 +40,8 @@ def scaling(theta_hat, empirical_support, true_variance):
     return theta_final
 
 def set_fname(args, fname):
-    # Adds y_type to filename.
-    if args.y_type == "gaussian":
-        fname += "_gaussian"
-    elif args.y_type == "sgn":
-        fname += "_sgn"
-    
+    """Adds variables in args to image filename."""
+
     # Adds theta_star_type to filename.
     if args.theta_star_type == "sparse":
         fname += "_sparse"
@@ -57,12 +61,10 @@ def set_fname(args, fname):
     return fname
 
 def plot(args, results):
+    """Generates all plots from task shift simulations."""
+
     n_range = list(range(args.n_start, args.n_end + 1, args.n_step))
-    n_postprocess_range = list(range(
-        args.n_postprocess_start,
-        args.n_postprocess_end + 1,
-        args.n_step,
-    ))
+    m_range = list(range(args.m_start, args.m_end + 1, args.m_step))
 
     # Defines a helper function for plotting the results.
     def plot_helper(
@@ -71,64 +73,121 @@ def plot(args, results):
         fname = set_fname(args, fname)
         
         # Plots specified range of data.
-        ma = 0
-        mi = 0.005
         for j, (metric, display_metric) in enumerate(zip(metrics, display_metrics)):
-            if max(results[metric]) > ma:
-                ma = max(results[metric])
-            if min(results[metric]) < mi:
-                mi = min(results[metric])
-
             color=None
             if colors:
                 color = colors[j]
 
-            plt.plot(
-                x,
-                results[metric],
-                label=display_metric,
-                linewidth=5,
-                color=color,
-            )
+            if metric in ("theta_hat_start", "theta_hat_end"):
+                plt.bar(
+                    x,
+                    results[metric],
+                    label=display_metric,
+                    color=color,
+                    width=1,
+                )
+            elif metric == "theta_star":
+                plt.scatter(
+                    x,
+                    results[metric],
+                    label=display_metric,
+                    color=color,
+                    marker="*",
+                    s=[100] * len(x)
+                )
+            else:
+                plt.plot(
+                    x,
+                    results[metric],
+                    label=display_metric,
+                    linewidth=5,
+                    color=color,
+                )
 
-        if "support" in fname:
+                plt.fill_between(
+                    x,
+                    results[metric] - results[metric + "_std"],
+                    results[metric] + results[metric + "_std"],
+                    alpha=0.2,
+                    color=color,
+                    facecolor=color,
+                )
+          
+        if "pct" in fname:
+            plt.xlabel(r"$n$")
+            plt.ylabel("%")
+            plt.ylim(0, 1)
+        elif "support" in fname:
             plt.xlabel("Index")
+            plt.legend(loc="upper right")
         elif "risk" in fname:
             plt.ylabel("Risk")
             plt.xlabel(r"$n$")
+            plt.legend(loc="center right")
         elif "postprocess" in fname:
             plt.ylabel("Risk")
             plt.xlabel(r"$m$")
+            plt.legend(loc="upper right")
 
-        if args.cov_type == "spiked" and not args.outside_support:
-            plt.ylim(min(0, mi - 0.005), min(1, ma + 0.005))
-        plt.legend()
-        plt.grid(alpha=0.5)
+        if metrics[0] == "theta_hat_start":
+            plt.ylim(-0.125, 0.25)
+        elif metrics[0] == "theta_tilde_risk":
+            plt.ylim(0, 0.76)
+        elif metrics[0] == "theta_new_risks":
+            plt.ylim(0, 0.15)
+
+        if args.cov_type == "spiked":
+            plt.title(r"$p={p}, q={q}, r={r}$".format(
+                p=args.spiked_p,
+                q=args.spiked_q,
+                r=args.spiked_r,
+            ))
+        elif args.cov_type == "isotropic":
+            plt.title("Isotropic")
+
+        if "support" in fname:
+            plt.grid(alpha=0.5, axis="y")
+        else:
+            plt.grid(alpha=0.5)
+
         plt.savefig(fname, bbox_inches="tight", dpi=600)
         plt.clf()
 
     # Plots results.
     plot_helper(
-        np.arange(100),
-        ["theta_hat_begin", "theta_hat_end"],
-        [rf"$n={args.n_end // 10}$", rf"$n={args.n_end}$"],
+        n_range,
+        ["support_pct"],
+        [None],
+        "pct",
+    )
+    plot_helper(
+        np.arange(10),
+        ["theta_hat_start", "theta_hat_end", "theta_star"],
+        [
+            r"$\hat{j}: n={k}$".format(j=r"\theta", k=args.n_start),
+            r"$\hat{j}: n={k}$".format(j=r"\theta", k=args.n_end),
+            r"$\theta^\star$"
+        ],
         "support",
+        colors=["C0", "C1", "black"],
     )
     plot_helper(
         n_range,
         ["theta_tilde_risk", "theta_hat_risk", "theta_new_risk"],
-        [r"$L(\tilde{\theta})$", r"$L(\hat{\theta})$", r"$L(\hat{\theta}^\prime)$"],
+        [r"$\tilde{\theta}$", r"$\hat{\theta}$", r"$\hat{\theta}_{\textnormal{post}}$"],
         "risk",
         colors=["C1", "C2", "C0"],
     )
     plot_helper(
-        n_postprocess_range,
+        m_range,
         ["theta_new_risks"],
-        [r"$L(\hat{\theta}^\prime)$"],
+        [r"$\hat{\theta}_{\textnormal{post}}$"],
         "postprocess",
     )
     
 def gradient_descent(X, y):
+    """Runs a simple version of gradient descent on data/label pair (X, y)."""
+
     max_steps = 1000
     early_stop_loss = 0.001
     learning_rate = 0.05
@@ -149,6 +208,8 @@ def gradient_descent(X, y):
     return theta
 
 def experiment_trial(args, results, idx, n):
+    """Runs a single trial of task shift simulations."""
+
     # Sets dimension d and spiked parameters.
     if args.cov_type == "spiked":
         d = int(n ** args.spiked_p)
@@ -160,7 +221,7 @@ def experiment_trial(args, results, idx, n):
     # Generates the covariance matrix.
     if args.cov_type == "isotropic":
         # Generates an isotropic (identity) covariance matrix.
-        cov_diag = torch.ones(d)
+        cov_diag = args.isotropic_coef * torch.ones(d)
     elif args.cov_type == "poly":
         # Generates a polynomial decay covariance matrix which is diagonal
         # with the jth entry being j^{-poly_pow}.
@@ -180,14 +241,16 @@ def experiment_trial(args, results, idx, n):
     if args.theta_star_type == "sparse":
         theta_star = torch.zeros(d)
         cov_on_support = cov_diag[torch.tensor(args.sparse_inds)]
-        theta_star[torch.tensor(args.sparse_inds) - 1] = torch.tensor(args.sparse_vals) / torch.sqrt(cov_on_support)
+        theta_star[torch.tensor(args.sparse_inds) - 1] \
+                = torch.tensor(args.sparse_vals) / torch.sqrt(cov_on_support)
 
         if args.outside_support:
             max_s = int(args.n_end ** args.spiked_r)
-            theta_star[max_s + 1] = args.outside_support_val / torch.sqrt(cov_diag[max_s + 1])
+            theta_star[max_s + 1] \
+                    = args.outside_support_val / torch.sqrt(cov_diag[max_s + 1])
     elif args.theta_star_type == "gaussian":
-        theta_star = torch.normal(0, 1, size=(d,))
-        theta_star = theta_star / torch.linalg.vector_norm(theta_star, ord=2)
+        D = Independent(Normal(0, 1 / (np.sqrt(d) * cov_diag.sqrt()), 1))
+        theta_star = D.sample((args.d,))
 
     # Computes total variance/signal strength.
     variance_vector = torch.sqrt(cov_diag) * theta_star
@@ -204,12 +267,8 @@ def experiment_trial(args, results, idx, n):
     X_test = D.sample((args.n_test,)) # n_test x d
     y_test = X_test @ theta_star # n_test
 
-    # Generates classifier data as either the signs of the regression labels
-    # or as independent standard Gaussians.
-    if args.y_type == "sgn":
-        y = torch.sign(y_tilde) # n
-    elif args.y_type == "gaussian":
-        y = torch.normal(0, 1, (n,)) # n
+    # Generates classification labels as the signs of the regression labels.
+    y = torch.sign(y_tilde) # n
 
     # Computes the minimum-norm interpolators for regression and classification.
     if args.solver == "direct":
@@ -231,11 +290,11 @@ def experiment_trial(args, results, idx, n):
         results["theta_hat_risk"][idx].append(theta_hat_test_risk)
         results["theta_tilde_risk"][idx].append(theta_tilde_test_risk)
 
-        # TODO: This part is hacky; depending on n_step it may not be // 10.
-        if n == args.n_end // 10:
-            results["theta_hat_begin"].append(theta_hat[:100])
+        if n == args.n_start:
+            results["theta_hat_start"].append(theta_hat[:10])
         elif n == args.n_end:
-            results["theta_hat_end"].append(theta_hat[:100])
+            results["theta_hat_end"].append(theta_hat[:10])
+        results["theta_star"].append(theta_star[:10])
 
     # Computes new predictor using postprocessing algorithm.
     if args.theta_star_type == "sparse":
@@ -245,21 +304,32 @@ def experiment_trial(args, results, idx, n):
             len_sparse += 1
         empirical_support = topk_inds(theta_hat, len_sparse)
 
+        # Checks if support was correctly recovered.
+        support_correct = 0.
+        empirical_inds = empirical_support.nonzero().squeeze().cpu().numpy()
+        true_inds = deepcopy(args.sparse_inds)
+        if args.outside_support:
+            true_inds.append(int(args.n_end ** args.spiked_r) + 2)
+        true_inds = np.asarray(true_inds) - 1
+        if (empirical_inds == true_inds).all():
+            support_correct = 1.
+        results["support_pct"][idx].append(support_correct)
+
         # Postprocesses either using least squares on few-shot regression data
         # or scaling the classification MNI using knowledge of variance.
         if args.postprocess == "least_squares":
-            n_postprocess_range = range(
-                args.n_postprocess_start,
-                args.n_postprocess_end + 1,
-                args.n_postprocess_step,
+            m_range = range(
+                args.m_start,
+                args.m_end + 1,
+                args.m_step,
             )
             theta_new_test_risks = []
-            for n_postprocess in n_postprocess_range:
-                X_postprocess = D.sample((n_postprocess,)) # n_postprocess x d
+            for m in m_range:
+                X_postprocess = D.sample((m,)) # m x d
 
                 # Performs dimension reduction using knowledge of the support.
-                X_postprocess = X_postprocess[:, empirical_support] # n_postprocess x k
-                y_postprocess = X_postprocess @ theta_star[empirical_support] # n_postprocess
+                X_postprocess = X_postprocess[:, empirical_support] # m x k
+                y_postprocess = X_postprocess @ theta_star[empirical_support] # m
 
                 # Adds Gaussian noise to regression labels.
                 noise = torch.normal(0, 1, (len(y_postprocess),))
@@ -268,7 +338,7 @@ def experiment_trial(args, results, idx, n):
                 # Computes least-squares estimator for few-shot regression data.
                 if args.solver == "direct":
                     A = torch.linalg.cholesky(X_postprocess.T @ X_postprocess) # k x k
-                    M = torch.cholesky_inverse(A) @ X_postprocess.T # k x n_postprocess
+                    M = torch.cholesky_inverse(A) @ X_postprocess.T # k x m
                     theta_new = M @ y_postprocess # k
                 elif args.solver == "gd":
                     theta_new = gradient_descent(X_postprocess, y_postprocess)
@@ -294,16 +364,23 @@ def experiment_trial(args, results, idx, n):
                 results["theta_new_risk"][idx].append(theta_new_test_risk)
 
 def experiment(args):
+    """Runs all trials of task shift simulations."""
+
     n_range = list(range(args.n_start, args.n_end + 1, args.n_step))
 
     # Initializes the results dictionary.
     results = {
-        "theta_hat_risk":      [[] for _ in range(len(n_range))],
-        "theta_hat_begin":     [],
-        "theta_hat_end":       [],
-        "theta_new_risks":     [[] for _ in range(len(n_range))],
-        "theta_tilde_risk":    [[] for _ in range(len(n_range))],
+        "support_pct":      [[] for _ in range(len(n_range))],
+        "theta_hat_risk":   [[] for _ in range(len(n_range))],
+        "theta_hat_start":  [],
+        "theta_hat_end":    [],
+        "theta_new_risks":  [[] for _ in range(len(n_range))],
+        "theta_star":       [],
+        "theta_tilde_risk": [[] for _ in range(len(n_range))],
     } 
+
+    for metric in list(results.keys()):
+        results[metric + "_std"] = None
 
     # Runs experiment trials.
     for idx, n in enumerate(n_range):
@@ -315,18 +392,27 @@ def experiment(args):
     # Computes the mean over all trials for each metric and value of n in the
     # results dictionary.
     for metric, value in results.items():
+        if "std" in metric:
+            continue
+
         try:
             value = torch.tensor(value)
         except:
             value = torch.stack(value).T
-        results[metric] = torch.mean(value, dim=1).cpu().numpy()
 
-    results["theta_new_risk"] = results["theta_new_risks"][:, -1] # last n_postprocess
+        results[metric] = torch.mean(value, dim=1).cpu().numpy()
+        results[metric + "_std"] = torch.std(value, dim=1).cpu().numpy()
+
+    results["theta_new_risk"] = results["theta_new_risks"][:, -1] # last m
+    results["theta_new_risk_std"] = results["theta_new_risks_std"][:, -1] # last m
     results["theta_new_risks"] = results["theta_new_risks"][-1, :] # last n
+    results["theta_new_risks_std"] = results["theta_new_risks_std"][-1, :] # last n
 
     return results
 
 def main(args):
+    """Runs all task shift simulations and plots results."""
+
     os.makedirs(args.out_dir, exist_ok=True)
 
     if args.cuda and torch.cuda.is_available():
@@ -342,39 +428,69 @@ if __name__ == "__main__":
     )
 
     # Loads configuration parameters into parser.
-    parser.add("--cov_type", choices=["isotropic", "poly", "spiked"], default="spiked")
-    parser.add("--cuda", default=True, type=lambda x: bool(strtobool(x)))
-    parser.add("--d_coef", default=1, type=float)
-    parser.add("--d_pow", default=1.5, type=float)
-    parser.add("--n_postprocess_start", default=100, type=int)
-    parser.add("--n_postprocess_step", default=50, type=int)
-    parser.add("--n_postprocess_end", default=1000, type=int)
-    parser.add("--n_start", default=50, type=int)
-    parser.add("--n_step", default=50, type=int)
-    parser.add("--n_end", default=2500, type=int)
-    parser.add("--n_test", default=100, type=int)
-    parser.add("--out_dir", default="out")
-    parser.add("--outside_support", default=False, type=lambda x: bool(strtobool(x)))
-    parser.add("--outside_support_val", default=1, type=float)
-    parser.add("--poly_pow", default=2, type=float)
-    parser.add("--postprocess", choices=["least_squares", "scaling"], default="least_squares")
-    parser.add("--solver", choices=["direct", "gd"], default="direct")
-    parser.add("--sparse_inds", default=[0], nargs="*", type=int)
-    parser.add("--sparse_vals", default=[1.], nargs="*", type=float)
-    parser.add("--spiked_p", default=1.5, type=float)
-    parser.add("--spiked_q", default=0.5, type=float)
-    parser.add("--spiked_r", default=0.25, type=float)
-    parser.add("--theta_star_type", choices=["gaussian", "sparse"], default="sparse")
-    parser.add("--trials", default=10, type=int)
-    parser.add("--y_type", choices=["gaussian", "sgn"], default="sgn")
+    parser.add("--cov_type", choices=["isotropic", "poly", "spiked"], default="spiked",
+               help="The type of covariance matrix to sample data from.")
+    parser.add("--cuda", default=True, type=lambda x: bool(strtobool(x)),
+               help="Whether to use cuda (GPU) or not (CPU).")
+    parser.add("--d_coef", default=1, type=float,
+               help="The coefficient a in d=a*n^b. Not used for spiked covariance.")
+    parser.add("--d_pow", default=1.5, type=float,
+               help="The exponent b in d=a*n^b. Not used for spiked covariance.")
+    parser.add("--isotropic_coef", default=50, type=float,
+               help="The coefficient a in \Sigma = a*I for isotropic covariance.")
+    parser.add("--n_start", default=100, type=int,
+               help="The first value of n (num of train data) to simulate.")
+    parser.add("--n_step", default=50, type=int,
+               help="The step between values of n (num of train data) to simulate.")
+    parser.add("--n_end", default=2500, type=int,
+               help="The last value of n (num of train data) to simulate.")
+    parser.add("--n_test", default=1000, type=int,
+               help="The num of data to use for the test set.")
+    parser.add("--m_start", default=20, type=int,
+               help="The first value of m (num of few-shot data) to simulate.")
+    parser.add("--m_step", default=10, type=int,
+               help="The step between values of m (num of few-shot data) to simulate.")
+    parser.add("--m_end", default=200, type=int,
+               help="The last value of m (num of few-shot data) to simulate.")
+    parser.add("--out_dir", default="out",
+               help="The directory to save generated files (e.g., images).")
+    parser.add("--outside_support", default=False, type=lambda x: bool(strtobool(x)),
+               help="Whether the signal should have a component supported outside the top k* indices of the covariance spectrum.")
+    parser.add("--outside_support_val", default=1, type=float,
+               help="The value for the signal's component supported outside the top k* indices of the covariance spectrum.")
+    parser.add("--poly_pow", default=0.5, type=float,
+               help="The exponent a in \Sigma=diag{j^-a} for polynomial decay covariance.")
+    parser.add("--postprocess", choices=["least_squares", "scaling"], default="least_squares",
+               help="Whether to run postprocessing with top-k least-squares or direct scaling.")
+    parser.add("--solver", choices=["direct", "gd"], default="direct",
+               help="Whether to solve for the MNI via matrix inversion or gradient descent.")
+    parser.add("--sparse_inds", default=[1], nargs="*", type=int,
+               help="Which indices of the signal should be nonzero (need not be consecutive).")
+    parser.add("--sparse_vals", default=[1.], nargs="*", type=float,
+               help="The values of the signal in its sparse components.")
+    parser.add("--spiked_p", default=1.5, type=float,
+               help="The value of p in the definition of spiked covariance.")
+    parser.add("--spiked_q", default=0.5, type=float,
+               help="The value of q in the definition of spiked covariance.")
+    parser.add("--spiked_r", default=0.25, type=float,
+               help="The value of r in the definition of spiked covariance.")
+    parser.add("--theta_star_type", choices=["gaussian", "sparse"], default="sparse",
+               help="Whether the signal should be sparse or random.")
+    parser.add("--trials", default=10, type=int,
+               help="The number of experimental trials to average results over.")
     args = parser.parse_args()
 
+    # Ensures spiked covariance parameters are legitimate.
     if args.spiked_p <= 1:
         raise ValueError(f"Found p = {args.spiked_p} but requires p > 1.")
     if args.spiked_q <= 0 or args.spiked_q > args.spiked_p - args.spiked_r:
         raise ValueError(f"Found q = {args.spiked_q} but requires 0 < q < p - r.")
     if args.spiked_r < 0 or args.spiked_r >= 1:
         raise ValueError(f"Found r = {args.spiked_r} but requires 0 <= r < 1.")
+
+    # Ensures sparse_inds and sparse_vals are the same length.
+    if len(args.sparse_inds) != len(args.sparse_vals):
+        raise ValueError("args.sparse_inds must match args.sparse_vals.")
 
     main(args)
 
